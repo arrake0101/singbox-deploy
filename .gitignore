@@ -1,0 +1,14 @@
+/private/
+/generated/
+/config/server.json
+/config/client.json
+/config/credentials.env
+.env
+.env.*
+.secrets/
+__pycache__/
+*.py[cod]
+*.log
+/config/config.json
+*.key
+*.pem

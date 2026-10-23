@@ -1,0 +1,23 @@
+#!/sbin/openrc-run
+# Managed by singbox-manual. OpenRC service for the installed core.
+
+description="sing-box proxy service"
+supervisor="supervise-daemon"
+command="/usr/local/bin/sing-box"
+command_args="run -c /etc/sing-box/config.json -D /var/lib/sing-box"
+pidfile="/run/sing-box.pid"
+respawn_delay=5
+respawn_max=5
+respawn_period=60
+output_log="/var/log/sing-box/stdout.log"
+error_log="/var/log/sing-box/stderr.log"
+required_files="/etc/sing-box/config.json"
+
+depend() {
+    after networking sshd
+}
+
+start_pre() {
+    checkpath -d -m 0750 /var/lib/sing-box /var/log/sing-box
+    "$command" check -c /etc/sing-box/config.json
+}

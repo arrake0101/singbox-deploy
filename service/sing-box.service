@@ -1,0 +1,18 @@
+# Managed by singbox-manual. systemd service for the installed core.
+[Unit]
+Description=sing-box proxy service
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/sing-box/config.json
+
+[Service]
+Type=simple
+WorkingDirectory=/var/lib/sing-box
+ExecStartPre=/usr/local/bin/sing-box check -c /etc/sing-box/config.json
+ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json -D /var/lib/sing-box
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

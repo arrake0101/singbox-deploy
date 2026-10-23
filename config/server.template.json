@@ -1,0 +1,77 @@
+{
+  "log": {
+    "level": "warn",
+    "timestamp": true
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "local",
+        "tag": "system-dns"
+      }
+    ]
+  },
+  "inbounds": [
+    {
+      "type": "anytls",
+      "tag": "anytls-in",
+      "listen": "0.0.0.0",
+      "listen_port": "@@ANYTLS_PORT@@",
+      "users": [
+        {
+          "name": "shared",
+          "password": "@@ANYTLS_PASSWORD@@"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "@@REALITY_SERVER@@",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "@@REALITY_SERVER@@",
+            "server_port": 443
+          },
+          "private_key": "@@REALITY_PRIVATE_KEY@@",
+          "short_id": ["@@REALITY_SHORT_ID@@"]
+        }
+      }
+    },
+    {
+      "type": "vless",
+      "tag": "vless-in",
+      "listen": "0.0.0.0",
+      "listen_port": "@@VLESS_PORT@@",
+      "users": [
+        {
+          "name": "shared",
+          "uuid": "@@VLESS_UUID@@",
+          "flow": "xtls-rprx-vision"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "@@REALITY_SERVER@@",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "@@REALITY_SERVER@@",
+            "server_port": 443
+          },
+          "private_key": "@@REALITY_PRIVATE_KEY@@",
+          "short_id": ["@@REALITY_SHORT_ID@@"]
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "default_domain_resolver": "system-dns",
+    "final": "direct"
+  }
+}
