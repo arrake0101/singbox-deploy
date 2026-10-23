@@ -1,4 +1,4 @@
-# singbox-manual
+# singbox-deploy
 
 为 Debian 和 Alpine 提供可读、可分步执行的 sing-box 安装脚本，也可一键安装。
 
