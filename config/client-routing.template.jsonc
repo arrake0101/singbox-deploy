@@ -1,0 +1,368 @@
+{
+  // v3 基于 routing-stack 的当前版本；保留普通 DNS / 业务策略，仅调整 Claude 和补充规则集。
+  // 目标 sing-box 1.14.3。节点为示例；本模板不安装“核心退出即断网”的系统防火墙。
+  "$schema": "https://sing-box.sagernet.org/schema.json",
+  "log": { "level": "info", "timestamp": true },
+
+  "dns": {
+    "servers": [
+      {
+        // 仅供已识别 Claude 来源的私网域名使用；普通 DNS 规则保持原版。
+        "type": "local", "tag": "dns_local",
+        "prefer_go": true
+      },
+      {
+        "type": "fakeip", "tag": "dns_fakeip",
+        "inet4_range": "198.19.0.0/16",
+        "inet6_range": "fc00::/18"
+      },
+      {
+        // 公开 DNS；Claude 非地址查询经 Claude 固定出口发送。
+        "type": "https", "tag": "dns_claude",
+        "server": "1.1.1.1", "server_port": 443,
+        "path": "/dns-query", "detour": "Claude",
+        "tls": { "enabled": true, "server_name": "cloudflare-dns.com" }
+      },
+      {
+        "type": "https", "tag": "dns_direct",
+        "server": "223.5.5.5", "server_port": 443,
+        "path": "/dns-query", "detour": "Direct",
+        "tls": { "enabled": true, "server_name": "dns.alidns.com" }
+      },
+      {
+        // Global 的业务出口同样是 Proxy，保证真实 DNS 查询与其使用同一选择器。
+        "type": "https", "tag": "dns_proxy",
+        "server": "8.8.8.8", "server_port": 443,
+        "path": "/dns-query", "detour": "Proxy",
+        "tls": { "enabled": true, "server_name": "dns.google" }
+      }
+    ],
+    "rules": [
+      {
+        "query_type": ["HTTPS", "SVCB"],
+        "action": "predefined",
+        "rcode": "NOERROR",
+        "answer": []
+      },
+      // D0：本机没有可用 IPv6 上游。国内域名集的 AAAA 直接回空答复，只让浏览器用 A 记录；
+      // 否则浏览器拿到真实国内 AAAA 后会连进 TUN（本地 TCP 握手成功、数据不来），
+      // 表现为 bilibili 这类有 AAAA 的站点页面卡死。国外与 Claude 的 FakeIP AAAA 保持原样。
+      {
+        "query_type": ["AAAA"],
+        "rule_set": ["fakeipfilter-cn", "geosite-cn", "geosite-microsoft@cn", "geosite-apple@cn", "geosite-private"],
+        "action": "predefined",
+        "rcode": "NOERROR",
+        "answer": []
+      },
+      // D1：Claude 来源的私网域名交给系统 DNS，保留本地开发 / localhost 用途。
+      // 只影响已识别的 Claude 来源；普通私网 DNS 仍按原有模式和规则处理。
+      {
+        "type": "logical", "mode": "and",
+        "rules": [
+          { "rule_set": "geosite-private" },
+          {
+            "type": "logical", "mode": "or",
+            "rules": [
+              { "inbound": "claude-in" },
+              { "process_name": ["claude.exe", "claude"] },
+              { "process_path_regex": ["(^|[\\\\/])\\.local[\\\\/]share[\\\\/]claude[\\\\/]versions[\\\\/][^\\\\/]+$"] }
+            ]
+          }
+        ],
+        "action": "route", "server": "dns_local"
+      },
+      // Claude 来源或域名优先于模式；A/AAAA 返回 FakeIP，其余记录经专用真实 DNS。
+      {
+        "type": "logical", "mode": "and",
+        "rules": [
+          { "query_type": ["A", "AAAA"] },
+          {
+            "type": "logical", "mode": "or",
+            "rules": [
+              { "inbound": "claude-in" },
+              { "process_name": ["claude.exe", "claude"] },
+              { "process_path_regex": ["(^|[\\\\/])\\.local[\\\\/]share[\\\\/]claude[\\\\/]versions[\\\\/][^\\\\/]+$"] },
+              { "rule_set": "claude-domains" }
+            ]
+          }
+        ],
+        "action": "route", "server": "dns_fakeip"
+      },
+      {
+        "type": "logical", "mode": "or",
+        "rules": [
+          { "inbound": "claude-in" },
+          { "process_name": ["claude.exe", "claude"] },
+          { "process_path_regex": ["(^|[\\\\/])\\.local[\\\\/]share[\\\\/]claude[\\\\/]versions[\\\\/][^\\\\/]+$"] },
+          { "rule_set": "claude-domains" }
+        ],
+        "action": "route", "server": "dns_claude", "remove_client_subnet": true
+      },
+
+      // D2：Direct 模式，普通 DNS 查询全部本地直连解析。
+      { "clash_mode": "Direct", "action": "route", "server": "dns_direct" },
+
+      // D3：Global 模式，普通 A/AAAA 返回 FakeIP；其余未处理记录经普通指定代理解析。
+      { "clash_mode": "Global", "query_type": ["A", "AAAA"], "action": "route", "server": "dns_fakeip" },
+      { "clash_mode": "Global", "action": "route", "server": "dns_proxy" },
+
+      // D4：以下是 Rule 模式。国内集合在国外 FakeIP 例外之前，重叠时国内规则先匹配。
+
+      // D5：国内域名只决定 DNS；业务连接不会因此被强制直连。
+      {"rule_set": ["fakeipfilter-cn", "geosite-cn", "geosite-microsoft@cn", "geosite-apple@cn", "geosite-private"], "server": "dns_direct","action": "route"},
+
+      {"rule_set": "fakeipfilter-!cn", "server": "dns_proxy","action": "route"},
+
+      {
+        "type": "logical",
+        "mode": "and",
+        "rules": [
+          { "query_type": ["A", "AAAA"] },
+          { "rule_set": "geosite-geolocation-!cn", "invert": true }
+        ],
+        "action": "evaluate",
+        "server": "dns_proxy",
+        "client_subnet": "223.5.5.0/24",
+        "timeout": "2s"
+      },
+      { "match_response": true, "rule_set": "geoip-cn", "server": "dns_direct", "action": "route" },
+      { "query_type": ["A", "AAAA"], "server": "dns_fakeip", "rewrite_ttl": 1, "action": "route" }
+    ],
+    "final": "dns_proxy",
+    "strategy": "prefer_ipv4",
+    "cache_capacity": 4096
+  },
+
+  "inbounds": [
+    {
+      // Windows / macOS / Linux 共用；不加入 Linux 专用 auto_redirect。
+      "type": "tun", "tag": "tun-in",
+      "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+      "auto_route": true,
+      "strict_route": true,
+      "dns_mode": "hijack"
+    },
+    {
+      // 普通显式 HTTP / SOCKS 代理入口；不自动修改系统代理设置。
+      "type": "mixed", "tag": "mixed-in",
+      "listen": "127.0.0.1", "listen_port": 17890
+    },
+    {
+      // 进入此端口的公网业务，无论目标是域名还是真实 IP，都固定走 Claude。
+      "type": "mixed", "tag": "claude-in",
+      "listen": "127.0.0.1", "listen_port": 17891
+    }
+  ],
+
+  "outbounds": [
+    {
+      // 真实 IP 直接拨号；旧 FakeIP 恢复为域名后，在 Direct 模式用 dns_direct 解析。
+      "type": "direct", "tag": "Direct",
+      "domain_resolver": "dns_direct"
+    },
+    {
+      // Rule 的普通代理与 Global 的指定出口共用此选择器；没有自动测速或直连候选。
+      "type": "selector", "tag": "Proxy",
+      "outbounds": ["PROXY_NODE"],
+      "default": "PROXY_NODE",
+      "interrupt_exist_connections": true
+    },
+    {
+      // 唯一候选；失败就失败，不退回 Proxy / Direct。
+      "type": "selector", "tag": "Claude",
+      "outbounds": ["CLAUDE_FIXED"],
+      "default": "CLAUDE_FIXED",
+      "interrupt_exist_connections": true
+    },
+    {
+      // 普通节点占位。按实际协议整段替换，保留 PROXY_NODE 标签。
+      "type": "anytls", "tag": "PROXY_NODE",
+      "server": "192.0.2.10", "server_port": 443,
+      "password": "REPLACE_PROXY_NODE_PASSWORD",
+      "tls": { "enabled": true, "server_name": "proxy-node.example.com" }
+    },
+    {
+      // 固定出口占位：前置节点连接到这个 HTTPS CONNECT 代理，由它访问 Claude。
+      "type": "http", "tag": "CLAUDE_FIXED",
+      "server": "198.51.100.20", "server_port": 443,
+      "detour": "CLAUDE_FRONT",
+      "username": "REPLACE_FIXED_USERNAME",
+      "password": "REPLACE_FIXED_PASSWORD",
+      "tls": { "enabled": true, "server_name": "fixed-egress.example.com" }
+    },
+    {
+      // Claude 前置节点独立于 Proxy，切换普通代理不会切换 Claude 的前置链路。
+      "type": "anytls", "tag": "CLAUDE_FRONT",
+      "server": "192.0.2.20", "server_port": 443,
+      "password": "REPLACE_CLAUDE_FRONT_PASSWORD",
+      "tls": { "enabled": true, "server_name": "claude-front.example.com" }
+    }
+  ],
+
+  "route": {
+    "rules": [
+
+      // {"type": "logical", "mode": "and", "rules": [{"port": [53, 853], "invert": true}, {"clash_mode": "Global", "invert": true}, {"type": "logical", "mode": "or", "rules": [{"ip_is_private": true}, {"rule_set": "geoip-cn"}]}], "action": "bypass"},
+      {
+        "type": "logical",
+        "mode": "or",
+        "rules": [
+          { "domain_suffix": "push.apple.com" },
+          { "rule_set": "geoip-telegram" },
+          { "rule_set": "claude-domains" }
+        ],
+        "invert": true,
+        "action": "sniff",
+        "sniffer": ["http", "tls", "stun", "quic", "dns"],
+        "timeout": "100ms"
+      },
+      {
+        "type": "logical",
+        "mode": "or",
+        "rules": [
+          { "port": 53 },
+          { "protocol": "dns" }
+        ],
+        "action": "hijack-dns"
+      },
+
+      { "ip_is_private": true, "action": "route","outbound": "Direct"},
+      {
+        "type": "logical",
+        "mode": "or",
+        "rules": [
+          { "port": 853 },
+          { "protocol": ["stun", "quic"] }
+        ],
+        "action": "reject",
+        "no_drop": true
+      },
+
+      // B1：原版全局协议拒绝后，Claude 固定出口不能处理的非 TCP 请求明确失败。
+      {
+        "type": "logical", "mode": "and",
+        "rules": [
+          { "network": "tcp", "invert": true },
+          {
+            "type": "logical", "mode": "or",
+            "rules": [
+              { "inbound": "claude-in" },
+              { "process_name": ["claude.exe", "claude"] },
+              { "process_path_regex": ["(^|[\\\\/])\\.local[\\\\/]share[\\\\/]claude[\\\\/]versions[\\\\/][^\\\\/]+$"] },
+              { "rule_set": "claude-domains" }
+            ]
+          }
+        ],
+        "action": "reject", "no_drop": true
+      },
+      // 进程名 / 路径只覆盖系统识别到的联网进程，不自动覆盖子进程和登录浏览器。
+      { "inbound": "claude-in", "action": "route", "outbound": "Claude" },
+      {
+        "process_name": ["claude.exe", "claude"],
+        "action": "route",
+        "outbound": "Claude"
+      },
+      {
+        "process_path_regex": [
+          "(^|[\\\\/])\\.local[\\\\/]share[\\\\/]claude[\\\\/]versions[\\\\/][^\\\\/]+$"
+        ],
+        "action": "route",
+        "outbound": "Claude"
+      },
+
+      { "rule_set": "claude-domains", "action": "route", "outbound": "Claude" },
+
+
+      // B3 / B4：普通业务的模式开关。Global 使用 Proxy 当前指定的节点。
+      { "clash_mode": "Direct", "action": "route", "outbound": "Direct" },
+      { "clash_mode": "Global", "action": "route", "outbound": "Proxy" },
+
+      // B5：Rule 模式下的已知国外域名。
+      { "rule_set": "geosite-geolocation-!cn", "action": "route", "outbound": "Proxy" },
+
+      { "inbound": "mixed-in", "action": "resolve" },
+
+      // B7：按这次连接的真实目标 IP 判断；没有“国内域名强制直连”规则。
+      { "rule_set": "geoip-cn", "action": "route", "outbound": "Direct" }
+    ],
+    // B8：漏网之鱼走普通代理，不是 Claude 固定出口。
+    "final": "Proxy",
+    "auto_detect_interface": true,
+    "default_domain_resolver": "dns_direct",
+    // 规则集：编译版 .srs 走 jsDelivr 下载，经 http_clients 的 rules-download（detour: Direct）直连，冷启动不依赖代理节点可达；
+    // geosite-geolocation-!cn 在 fastly 上报 150 MB 包体限制，单独用同源的 gcore.jsdelivr.net；
+    // fakeipfilter-cn / fakeipfilter-!cn 上游只有 JSON，保持 source（合计约 6 KB）；更新间隔 7 天。
+    "rule_set": [
+      {
+        "type": "remote", "tag": "claude-domains",
+        "format": "binary",
+        "url": "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/anthropic.srs",
+        "http_client": "rules-download", "update_interval": "7d"
+      },
+      {
+        "type": "remote", "tag": "geosite-cn",
+        "format": "binary",
+        "url": "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/cn.srs",
+        "http_client": "rules-download", "update_interval": "7d"
+      },
+      {
+        "type": "remote", "tag": "geoip-cn",
+        "format": "binary",
+        "url": "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geoip/cn.srs",
+        "http_client": "rules-download", "update_interval": "7d"
+      },
+      {
+        // 原 DNS 的 geosite-geolocation-!cn 引用；与业务用的 geosite-foreign 同源。
+        "type": "remote", "tag": "geosite-geolocation-!cn", "format": "binary",
+        "url": "https://gcore.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/geolocation-!cn.srs",
+        "http_client": "rules-download", "update_interval": "7d"
+      },
+      {
+        "type": "remote", "tag": "fakeipfilter-cn", "format": "source",
+        "url": "https://fastly.jsdelivr.net/gh/qichiyuhub/rule@main/rules/fakeipfilter-cn.json",
+        "http_client": "rules-download", "update_interval": "7d"
+      },
+      {
+        "type": "remote", "tag": "fakeipfilter-!cn", "format": "source",
+        "url": "https://fastly.jsdelivr.net/gh/qichiyuhub/rule@main/rules/fakeipfilter-!cn.json",
+        "http_client": "rules-download", "update_interval": "7d"
+      },
+      {
+        "type": "remote", "tag": "geosite-microsoft@cn", "format": "binary",
+        "url": "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/microsoft@cn.srs",
+        "http_client": "rules-download", "update_interval": "7d"
+      },
+      {
+        "type": "remote", "tag": "geosite-apple@cn", "format": "binary",
+        "url": "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/apple@cn.srs",
+        "http_client": "rules-download", "update_interval": "7d"
+      },
+      {
+        "type": "remote", "tag": "geosite-private", "format": "binary",
+        "url": "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/private.srs",
+        "http_client": "rules-download", "update_interval": "7d"
+      },
+      {
+        "type": "remote", "tag": "geoip-telegram", "format": "binary",
+        "url": "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geoip/telegram.srs",
+        "http_client": "rules-download", "update_interval": "7d"
+      }
+    ]
+  },
+
+  // 规则下载属于启动 / 维护流量，固定经普通 Proxy，不依赖 Claude 固定出口。
+  // 规则集下载用的 HTTP 客户端：只指向 Direct，冷启动不依赖代理节点。
+  "http_clients": [
+    { "tag": "rules-download", "detour": "Direct" }
+  ],
+  "experimental": {
+    // 持久保存规则与 FakeIP 映射；不把普通 DNS 答复持久保存到磁盘。
+    "cache_file": { "enabled": true, "path": "routing-stack-v3-cache.db", "cache_id": "routing-stack-v3", "store_fakeip": true },
+    "clash_api": {
+      "external_controller": "127.0.0.1:19090",
+      "secret": "REPLACE_WITH_RANDOM_CONTROLLER_SECRET",
+      "default_mode": "Rule",
+      "access_control_allow_origin": ["http://127.0.0.1:19090"]
+    }
+  }
+}
