@@ -1,0 +1,23 @@
+{
+  "name": "singbox-routing-visualizer",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "sing-box DNS / 业务路由流水栈可视化（读取 config/client-routing.template.jsonc）",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "jsonc-parser": "^3.3.1"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vite-plugin-singlefile": "^2.3.4",
+    "vitest": "^5.1.0"
+  }
+}
